@@ -39,6 +39,26 @@ export interface AgentRun extends Run {
     actions: AgentAction[]
 }
 
+export interface LLMGenerationPayload {
+    text: string
+    message?: BaseMessageLike
+    usage_metadata?: Record<string, any>
+    generationInfo?: Record<string, any>
+}
+
+export interface LLMEndPayload {
+    text: string
+    modelName?: string
+    usageMetadata?: Record<string, any>
+    responseMetadata?: Record<string, any>
+    generations?: LLMGenerationPayload[]
+}
+
+export interface LLMErrorPayload {
+    error: string | object
+    modelName?: string
+}
+
 interface ArizeTracerOptions {
     apiKey: string
     spaceId: string
@@ -1400,25 +1420,56 @@ export class AnalyticHandler {
         return returnIds
     }
 
-    async onLLMEnd(returnIds: ICommonObject, output: string) {
+    async onLLMEnd(returnIds: ICommonObject, payload: LLMEndPayload) {
+        const normalizedPayload: LLMEndPayload = {
+            text: payload.text,
+            modelName: payload.modelName,
+            usageMetadata: payload.usageMetadata,
+            responseMetadata: payload.responseMetadata,
+            generations: payload.generations
+        }
+
+        const formattedGenerations = this.formatLLMGenerations(normalizedPayload)
+
         if (Object.prototype.hasOwnProperty.call(this.handlers, 'langSmith')) {
             const llmRun: RunTree | undefined = this.handlers['langSmith'].llmRun[returnIds['langSmith'].llmRun]
             if (llmRun) {
                 await llmRun.end({
                     outputs: {
-                        generations: [output]
+                        generations: formattedGenerations
                     }
                 })
-                await llmRun.patchRun()
+                const extraPayload = this.buildLLMRunExtra(normalizedPayload)
+                if (extraPayload) {
+                    await llmRun.patchRun({
+                        extra: extraPayload
+                    })
+                } else {
+                    await llmRun.patchRun()
+                }
             }
         }
 
         if (Object.prototype.hasOwnProperty.call(this.handlers, 'langFuse')) {
             const generation: LangfuseGenerationClient | undefined = this.handlers['langFuse'].generation[returnIds['langFuse'].generation]
             if (generation) {
-                generation.end({
-                    output: output
-                })
+                const generationPayload: Record<string, any> = {
+                    output: normalizedPayload.text
+                }
+
+                if (normalizedPayload.responseMetadata) {
+                    generationPayload.metadata = normalizedPayload.responseMetadata
+                }
+
+                if (normalizedPayload.usageMetadata) {
+                    generationPayload.usage = normalizedPayload.usageMetadata
+                }
+
+                if (normalizedPayload.modelName) {
+                    generationPayload.model = normalizedPayload.modelName
+                }
+
+                generation.end(generationPayload)
             }
         }
 
@@ -1427,27 +1478,64 @@ export class AnalyticHandler {
             const monitor = this.handlers['lunary'].client
 
             if (monitor && llmEventId) {
-                await monitor.trackEvent('llm', 'end', {
+                const eventPayload: Record<string, any> = {
                     runId: llmEventId,
-                    output
-                })
+                    output: normalizedPayload.text
+                }
+
+                if (normalizedPayload.usageMetadata) {
+                    eventPayload.usage = normalizedPayload.usageMetadata
+                }
+
+                if (normalizedPayload.responseMetadata) {
+                    eventPayload.responseMetadata = normalizedPayload.responseMetadata
+                }
+
+                if (normalizedPayload.modelName) {
+                    eventPayload.model = normalizedPayload.modelName
+                }
+
+                await monitor.trackEvent('llm', 'end', eventPayload)
             }
         }
 
         if (Object.prototype.hasOwnProperty.call(this.handlers, 'langWatch')) {
             const span: LangWatchSpan | undefined = this.handlers['langWatch'].span[returnIds['langWatch'].span]
             if (span) {
-                span.end({
-                    output: autoconvertTypedValues(output)
-                })
+                const spanPayload: Record<string, any> = {
+                    output: autoconvertTypedValues(normalizedPayload.text)
+                }
+
+                if (normalizedPayload.usageMetadata) {
+                    spanPayload.usage_metadata = autoconvertTypedValues(normalizedPayload.usageMetadata)
+                }
+
+                if (normalizedPayload.responseMetadata) {
+                    spanPayload.response_metadata = autoconvertTypedValues(normalizedPayload.responseMetadata)
+                }
+
+                if (normalizedPayload.modelName) {
+                    spanPayload.model = normalizedPayload.modelName
+                }
+
+                span.end(spanPayload)
             }
         }
 
         if (Object.prototype.hasOwnProperty.call(this.handlers, 'arize')) {
             const llmSpan: Span | undefined = this.handlers['arize'].llmSpan[returnIds['arize'].llmSpan]
             if (llmSpan) {
-                llmSpan.setAttribute('output.value', JSON.stringify(output))
+                llmSpan.setAttribute('output.value', JSON.stringify(normalizedPayload.text))
                 llmSpan.setAttribute('output.mime_type', 'application/json')
+                if (normalizedPayload.usageMetadata) {
+                    llmSpan.setAttribute('llm.token_usage', JSON.stringify(normalizedPayload.usageMetadata))
+                }
+                if (normalizedPayload.responseMetadata) {
+                    llmSpan.setAttribute('llm.response_metadata', JSON.stringify(normalizedPayload.responseMetadata))
+                }
+                if (normalizedPayload.modelName) {
+                    llmSpan.setAttribute('llm.model_name', normalizedPayload.modelName)
+                }
                 llmSpan.setStatus({ code: SpanStatusCode.OK })
                 llmSpan.end()
             }
@@ -1456,8 +1544,17 @@ export class AnalyticHandler {
         if (Object.prototype.hasOwnProperty.call(this.handlers, 'phoenix')) {
             const llmSpan: Span | undefined = this.handlers['phoenix'].llmSpan[returnIds['phoenix'].llmSpan]
             if (llmSpan) {
-                llmSpan.setAttribute('output.value', JSON.stringify(output))
+                llmSpan.setAttribute('output.value', JSON.stringify(normalizedPayload.text))
                 llmSpan.setAttribute('output.mime_type', 'application/json')
+                if (normalizedPayload.usageMetadata) {
+                    llmSpan.setAttribute('llm.token_usage', JSON.stringify(normalizedPayload.usageMetadata))
+                }
+                if (normalizedPayload.responseMetadata) {
+                    llmSpan.setAttribute('llm.response_metadata', JSON.stringify(normalizedPayload.responseMetadata))
+                }
+                if (normalizedPayload.modelName) {
+                    llmSpan.setAttribute('llm.model_name', normalizedPayload.modelName)
+                }
                 llmSpan.setStatus({ code: SpanStatusCode.OK })
                 llmSpan.end()
             }
@@ -1466,15 +1563,27 @@ export class AnalyticHandler {
         if (Object.prototype.hasOwnProperty.call(this.handlers, 'opik')) {
             const llmSpan: Span | undefined = this.handlers['opik'].llmSpan[returnIds['opik'].llmSpan]
             if (llmSpan) {
-                llmSpan.setAttribute('output.value', JSON.stringify(output))
+                llmSpan.setAttribute('output.value', JSON.stringify(normalizedPayload.text))
                 llmSpan.setAttribute('output.mime_type', 'application/json')
+                if (normalizedPayload.usageMetadata) {
+                    llmSpan.setAttribute('llm.token_usage', JSON.stringify(normalizedPayload.usageMetadata))
+                }
+                if (normalizedPayload.responseMetadata) {
+                    llmSpan.setAttribute('llm.response_metadata', JSON.stringify(normalizedPayload.responseMetadata))
+                }
+                if (normalizedPayload.modelName) {
+                    llmSpan.setAttribute('llm.model_name', normalizedPayload.modelName)
+                }
                 llmSpan.setStatus({ code: SpanStatusCode.OK })
                 llmSpan.end()
             }
         }
     }
 
-    async onLLMError(returnIds: ICommonObject, error: string | object) {
+    async onLLMError(returnIds: ICommonObject, payload: LLMErrorPayload | string | object) {
+        const normalizedPayload = this.normalizeLLMErrorPayload(payload)
+        const { error, modelName } = normalizedPayload
+
         if (Object.prototype.hasOwnProperty.call(this.handlers, 'langSmith')) {
             const llmRun: RunTree | undefined = this.handlers['langSmith'].llmRun[returnIds['langSmith'].llmRun]
             if (llmRun) {
@@ -1483,16 +1592,29 @@ export class AnalyticHandler {
                         error
                     }
                 })
-                await llmRun.patchRun()
+                const extraPayload = this.buildLLMErrorExtra(normalizedPayload)
+                if (extraPayload) {
+                    await llmRun.patchRun({
+                        extra: extraPayload
+                    })
+                } else {
+                    await llmRun.patchRun()
+                }
             }
         }
 
         if (Object.prototype.hasOwnProperty.call(this.handlers, 'langFuse')) {
             const generation: LangfuseGenerationClient | undefined = this.handlers['langFuse'].generation[returnIds['langFuse'].generation]
             if (generation) {
-                generation.end({
+                const generationPayload: Record<string, any> = {
                     output: error
-                })
+                }
+
+                if (modelName) {
+                    generationPayload.model = modelName
+                }
+
+                generation.end(generationPayload)
             }
         }
 
@@ -1501,19 +1623,31 @@ export class AnalyticHandler {
             const monitor = this.handlers['lunary'].client
 
             if (monitor && llmEventId) {
-                await monitor.trackEvent('llm', 'end', {
+                const eventPayload: Record<string, any> = {
                     runId: llmEventId,
                     output: error
-                })
+                }
+
+                if (modelName) {
+                    eventPayload.model = modelName
+                }
+
+                await monitor.trackEvent('llm', 'end', eventPayload)
             }
         }
 
         if (Object.prototype.hasOwnProperty.call(this.handlers, 'langWatch')) {
             const span: LangWatchSpan | undefined = this.handlers['langWatch'].span[returnIds['langWatch'].span]
             if (span) {
-                span.end({
+                const spanPayload: Record<string, any> = {
                     error
-                })
+                }
+
+                if (modelName) {
+                    spanPayload.model = modelName
+                }
+
+                span.end(spanPayload)
             }
         }
 
@@ -1522,6 +1656,9 @@ export class AnalyticHandler {
             if (llmSpan) {
                 llmSpan.setAttribute('error.value', JSON.stringify(error))
                 llmSpan.setAttribute('error.mime_type', 'application/json')
+                if (modelName) {
+                    llmSpan.setAttribute('llm.model_name', modelName)
+                }
                 llmSpan.setStatus({ code: SpanStatusCode.ERROR, message: error.toString() })
                 llmSpan.end()
             }
@@ -1532,6 +1669,9 @@ export class AnalyticHandler {
             if (llmSpan) {
                 llmSpan.setAttribute('error.value', JSON.stringify(error))
                 llmSpan.setAttribute('error.mime_type', 'application/json')
+                if (modelName) {
+                    llmSpan.setAttribute('llm.model_name', modelName)
+                }
                 llmSpan.setStatus({ code: SpanStatusCode.ERROR, message: error.toString() })
                 llmSpan.end()
             }
@@ -1542,8 +1682,114 @@ export class AnalyticHandler {
             if (llmSpan) {
                 llmSpan.setAttribute('error.value', JSON.stringify(error))
                 llmSpan.setAttribute('error.mime_type', 'application/json')
+                if (modelName) {
+                    llmSpan.setAttribute('llm.model_name', modelName)
+                }
                 llmSpan.setStatus({ code: SpanStatusCode.ERROR, message: error.toString() })
                 llmSpan.end()
+            }
+        }
+    }
+
+    private formatLLMGenerations(payload: LLMEndPayload): any[] {
+        const defaultGeneration: LLMGenerationPayload = {
+            text: payload.text,
+            message: { role: 'assistant', content: payload.text },
+            usage_metadata: payload.usageMetadata,
+            generationInfo: payload.responseMetadata
+        }
+
+        const generations = payload.generations && payload.generations.length ? payload.generations : [defaultGeneration]
+
+        return generations.map((generation) => {
+            const message = generation.message ?? { role: 'assistant', content: generation.text }
+            const usageMetadata = generation.usage_metadata ?? payload.usageMetadata
+            const generationInfo = generation.generationInfo ?? payload.responseMetadata
+
+            const formattedGeneration: Record<string, any> = {
+                text: generation.text,
+                message: this.serializeMessage(message)
+            }
+
+            if (usageMetadata) {
+                formattedGeneration.usage_metadata = usageMetadata
+            }
+
+            if (generationInfo) {
+                formattedGeneration.generationInfo = generationInfo
+            }
+
+            return formattedGeneration
+        })
+    }
+
+    private buildLLMRunExtra(payload: LLMEndPayload): Record<string, any> | undefined {
+        const extra: Record<string, any> = {}
+        const llmOutput: Record<string, any> = {}
+
+        if (payload.usageMetadata) {
+            llmOutput.tokenUsage = payload.usageMetadata
+        }
+
+        if (payload.responseMetadata) {
+            llmOutput.responseMetadata = payload.responseMetadata
+        }
+
+        if (payload.modelName) {
+            llmOutput.modelName = payload.modelName
+        }
+
+        if (Object.keys(llmOutput).length) {
+            extra.llmOutput = llmOutput
+        }
+
+        return Object.keys(extra).length ? extra : undefined
+    }
+
+    private serializeMessage(message: BaseMessageLike): any {
+        if (typeof message === 'string') {
+            return { role: 'assistant', content: message }
+        }
+
+        const candidate = message as any
+
+        if (candidate instanceof AIMessageChunk) {
+            if (typeof candidate.toDict === 'function') {
+                return candidate.toDict()
+            }
+            if (typeof candidate.toJSON === 'function') {
+                return candidate.toJSON()
+            }
+            return { role: 'assistant', content: candidate.content }
+        }
+
+        if (candidate && typeof candidate.toDict === 'function') {
+            return candidate.toDict()
+        }
+
+        if (candidate && typeof candidate.toJSON === 'function') {
+            return candidate.toJSON()
+        }
+
+        return message
+    }
+
+    private normalizeLLMErrorPayload(payload: LLMErrorPayload | string | object): LLMErrorPayload {
+        if (typeof payload === 'object' && payload !== null && 'error' in payload) {
+            return payload as LLMErrorPayload
+        }
+
+        return {
+            error: payload as string | object
+        }
+    }
+
+    private buildLLMErrorExtra(payload: LLMErrorPayload): Record<string, any> | undefined {
+        if (!payload.modelName) return undefined
+
+        return {
+            llmOutput: {
+                modelName: payload.modelName
             }
         }
     }

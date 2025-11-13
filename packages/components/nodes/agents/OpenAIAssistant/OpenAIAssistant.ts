@@ -14,7 +14,7 @@ import { getCredentialData, getCredentialParam } from '../../../src/utils'
 import fetch from 'node-fetch'
 import { flatten, uniqWith, isEqual } from 'lodash'
 import { zodToJsonSchema } from 'zod-to-json-schema'
-import { AnalyticHandler } from '../../../src/handler'
+import { AnalyticHandler, LLMGenerationPayload } from '../../../src/handler'
 import { Moderation, checkInputs, streamResponse } from '../../moderation/Moderation'
 import { formatResponse } from '../../outputparsers/OutputParserHelpers'
 import { addSingleFileToStorage } from '../../../src/storageUtils'
@@ -171,6 +171,8 @@ class OpenAIAssistant_Agents implements INode {
 
         const openai = new OpenAI({ apiKey: openAIApiKey })
         options.logger.info(`[${orgId}]: Clearing OpenAI Thread ${sessionId}`)
+        let assistantModelName = ''
+
         try {
             if (sessionId && sessionId.startsWith('thread_')) {
                 await openai.beta.threads.del(sessionId)
@@ -250,6 +252,7 @@ class OpenAIAssistant_Agents implements INode {
 
             // Retrieve assistant
             const retrievedAssistant = await openai.beta.assistants.retrieve(openAIAssistantId)
+            assistantModelName = retrievedAssistant.model || assistantModelName
 
             if (formattedTools.length) {
                 let filteredTools = []
@@ -610,7 +613,7 @@ class OpenAIAssistant_Agents implements INode {
 
                                 const errMsg = `Error submitting tool outputs. Thread ID: ${threadId}. Run ID: ${runThreadId}`
 
-                                await analyticHandlers.onLLMError(llmIds, errMsg)
+                                await analyticHandlers.onLLMError(llmIds, { error: errMsg, modelName: assistantModelName })
                                 await analyticHandlers.onChainError(parentIds, errMsg, true)
 
                                 throw new Error(errMsg)
@@ -629,7 +632,16 @@ class OpenAIAssistant_Agents implements INode {
                 let llmOutput = text.replace(imageRegex, '')
                 llmOutput = llmOutput.replace('<br/>', '')
 
-                await analyticHandlers.onLLMEnd(llmIds, llmOutput)
+                const generationPayload: LLMGenerationPayload = {
+                    text: llmOutput,
+                    message: { role: 'assistant', content: llmOutput }
+                }
+
+                await analyticHandlers.onLLMEnd(llmIds, {
+                    text: llmOutput,
+                    modelName: assistantModelName,
+                    generations: [generationPayload]
+                })
                 await analyticHandlers.onChainEnd(parentIds, messageData, true)
 
                 return {
@@ -919,7 +931,16 @@ class OpenAIAssistant_Agents implements INode {
             let llmOutput = returnVal.replace(imageRegex, '')
             llmOutput = llmOutput.replace('<br/>', '')
 
-            await analyticHandlers.onLLMEnd(llmIds, llmOutput)
+            const generationPayload: LLMGenerationPayload = {
+                text: llmOutput,
+                message: { role: 'assistant', content: llmOutput }
+            }
+
+            await analyticHandlers.onLLMEnd(llmIds, {
+                text: llmOutput,
+                modelName: assistantModelName,
+                generations: [generationPayload]
+            })
             await analyticHandlers.onChainEnd(parentIds, messageData, true)
 
             return {
@@ -1140,7 +1161,7 @@ async function handleToolSubmission(params: ToolSubmissionParams): Promise<ToolS
 
         const errMsg = `Error submitting tool outputs. Thread ID: ${threadId}. Run ID: ${runThreadId}`
 
-        await analyticHandlers.onLLMError(llmIds, errMsg)
+        await analyticHandlers.onLLMError(llmIds, { error: errMsg, modelName: assistantModelName })
         await analyticHandlers.onChainError(parentIds, errMsg, true)
 
         throw new Error(errMsg)
