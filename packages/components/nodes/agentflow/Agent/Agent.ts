@@ -12,7 +12,7 @@ import {
     IUsedTool
 } from '../../../src/Interface'
 import { AIMessageChunk, BaseMessageLike, MessageContentText } from '@langchain/core/messages'
-import { AnalyticHandler } from '../../../src/handler'
+import { AnalyticHandler, LLMGenerationPayload } from '../../../src/handler'
 import { DEFAULT_SUMMARIZER_TEMPLATE } from '../prompt'
 import { ILLMMessage } from '../Interface.Agentflow'
 import { Tool } from '@langchain/core/tools'
@@ -547,6 +547,12 @@ class Agent_Agentflow implements INode {
     async run(nodeData: INodeData, input: string | Record<string, any>, options: ICommonObject): Promise<any> {
         let llmIds: ICommonObject | undefined
         let analyticHandlers = options.analyticHandlers as AnalyticHandler
+
+        let analyticsModelName =
+            (modelConfig?.model as string) ||
+            (modelConfig?.modelName as string) ||
+            (modelConfig?.name as string) ||
+            model
 
         try {
             const abortController = options.abortController as AbortController
@@ -1176,7 +1182,51 @@ class Agent_Agentflow implements INode {
 
             // End analytics tracking
             if (analyticHandlers && llmIds) {
-                await analyticHandlers.onLLMEnd(llmIds, finalResponse)
+                let usageMetadata = response.usage_metadata ? { ...response.usage_metadata } : undefined
+                const responseMetadata = response.response_metadata ? { ...response.response_metadata } : undefined
+
+                if (additionalTokens > 0) {
+                    if (usageMetadata) {
+                        const originalTokens = typeof usageMetadata.total_tokens === 'number' ? usageMetadata.total_tokens : 0
+                        usageMetadata.total_tokens = originalTokens + additionalTokens
+                        const existingToolTokens =
+                            typeof usageMetadata.tool_call_tokens === 'number' ? usageMetadata.tool_call_tokens : 0
+                        usageMetadata.tool_call_tokens = existingToolTokens + additionalTokens
+                    } else {
+                        usageMetadata = {
+                            total_tokens: additionalTokens,
+                            tool_call_tokens: additionalTokens
+                        }
+                    }
+                }
+
+                if (responseMetadata && typeof responseMetadata === 'object' && 'model' in responseMetadata) {
+                    const metadataModel = (responseMetadata as Record<string, any>).model
+                    if (typeof metadataModel === 'string' && metadataModel.length) {
+                        analyticsModelName = metadataModel
+                    }
+                }
+
+                const generationPayload: LLMGenerationPayload = {
+                    text: finalResponse,
+                    message: { role: 'assistant', content: finalResponse }
+                }
+
+                if (usageMetadata) {
+                    generationPayload.usage_metadata = usageMetadata
+                }
+
+                if (responseMetadata) {
+                    generationPayload.generationInfo = responseMetadata
+                }
+
+                await analyticHandlers.onLLMEnd(llmIds, {
+                    text: finalResponse,
+                    modelName: analyticsModelName,
+                    usageMetadata,
+                    responseMetadata,
+                    generations: [generationPayload]
+                })
             }
 
             // Send additional streaming events if needed
@@ -1263,7 +1313,10 @@ class Agent_Agentflow implements INode {
             }
         } catch (error) {
             if (options.analyticHandlers && llmIds) {
-                await options.analyticHandlers.onLLMError(llmIds, error instanceof Error ? error.message : String(error))
+                await options.analyticHandlers.onLLMError(llmIds, {
+                    error: error instanceof Error ? error.message : String(error),
+                    modelName: analyticsModelName
+                })
             }
 
             if (error instanceof Error && error.message === 'Aborted') {

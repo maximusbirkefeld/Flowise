@@ -1,4 +1,4 @@
-import { AnalyticHandler } from '../../../src/handler'
+import { AnalyticHandler, LLMGenerationPayload } from '../../../src/handler'
 import { ICommonObject, INode, INodeData, INodeOptionsValue, INodeOutputsValue, INodeParams } from '../../../src/Interface'
 import { AIMessageChunk, BaseMessageLike } from '@langchain/core/messages'
 import {
@@ -250,6 +250,12 @@ class ConditionAgent_Agentflow implements INode {
         let llmIds: ICommonObject | undefined
         let analyticHandlers = options.analyticHandlers as AnalyticHandler
 
+        let analyticsModelName =
+            (modelConfig?.model as string) ||
+            (modelConfig?.modelName as string) ||
+            (modelConfig?.name as string) ||
+            model
+
         try {
             const abortController = options.abortController as AbortController
 
@@ -378,10 +384,38 @@ class ConditionAgent_Agentflow implements INode {
 
             // End analytics tracking
             if (analyticHandlers && llmIds) {
-                await analyticHandlers.onLLMEnd(
-                    llmIds,
+                const responseText =
                     typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
-                )
+                const usageMetadata = response.usage_metadata ? { ...response.usage_metadata } : undefined
+                const responseMetadata = response.response_metadata ? { ...response.response_metadata } : undefined
+
+                if (responseMetadata && typeof responseMetadata === 'object' && 'model' in responseMetadata) {
+                    const metadataModel = (responseMetadata as Record<string, any>).model
+                    if (typeof metadataModel === 'string' && metadataModel.length) {
+                        analyticsModelName = metadataModel
+                    }
+                }
+
+                const generationPayload: LLMGenerationPayload = {
+                    text: responseText,
+                    message: { role: 'assistant', content: responseText }
+                }
+
+                if (usageMetadata) {
+                    generationPayload.usage_metadata = usageMetadata
+                }
+
+                if (responseMetadata) {
+                    generationPayload.generationInfo = responseMetadata
+                }
+
+                await analyticHandlers.onLLMEnd(llmIds, {
+                    text: responseText,
+                    modelName: analyticsModelName,
+                    usageMetadata,
+                    responseMetadata,
+                    generations: [generationPayload]
+                })
             }
 
             let calledOutputName: string
@@ -456,7 +490,10 @@ class ConditionAgent_Agentflow implements INode {
             return returnOutput
         } catch (error) {
             if (options.analyticHandlers && llmIds) {
-                await options.analyticHandlers.onLLMError(llmIds, error instanceof Error ? error.message : String(error))
+                await options.analyticHandlers.onLLMError(llmIds, {
+                    error: error instanceof Error ? error.message : String(error),
+                    modelName: analyticsModelName
+                })
             }
 
             if (error instanceof Error && error.message === 'Aborted') {
